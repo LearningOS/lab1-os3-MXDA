@@ -18,9 +18,11 @@ use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use lazy_static::*;
+use alloc::vec;
+use alloc::vec::Vec;
 pub use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
-
+pub use task::{TaskControlBlock, TaskStatus, TaskSysCallTimes};
+use crate::timer::get_time_us;
 pub use context::TaskContext;
 
 /// The task manager, where all the tasks are managed.
@@ -44,6 +46,7 @@ struct TaskManagerInner {
     /// task list
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
+    syscall_times_record: Vec<TaskSysCallTimes>,
     current_task: usize,
 }
 
@@ -54,16 +57,21 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            first_running_time: 0, 
         }; MAX_APP_NUM];
         for (i, t) in tasks.iter_mut().enumerate().take(num_app) {
             t.task_cx = TaskContext::goto_restore(init_app_cx(i));
             t.task_status = TaskStatus::Ready;
         }
+        let mut tasks_syscall_times = vec![TaskSysCallTimes{
+            syscall_times: vec![0; MAX_SYSCALL_NUM],
+        }; MAX_APP_NUM];
         TaskManager {
             num_app,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
+                    syscall_times_record: tasks_syscall_times,
                     current_task: 0,
                 })
             },
@@ -81,6 +89,9 @@ impl TaskManager {
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
+        if task0.first_running_time == 0 {
+            task0.first_running_time = get_time_us() / 1000;
+        }
         drop(inner);
         let mut _unused = TaskContext::zero_init();
         // before this, we should drop local variables that must be dropped manually
@@ -123,6 +134,9 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
+            if inner.tasks[next].first_running_time == 0 {
+                inner.tasks[next].first_running_time = get_time_us() / 1000;
+            }
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
@@ -135,31 +149,48 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
-    fn get_current_first_running(&self) -> usize {
-        let inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        inner.tasks[current].first_running_time 
-    }
-    fn get_current_status(&self) -> TaskStatus {
+    fn get_current_task_status(&self) -> TaskStatus {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
         inner.tasks[current].task_status
     }
-    fn update_syscall_times(&self, syscall_id: usize) {
-        let mut inner = slef.inner.exclusive_access();
+    fn get_current_task_first_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        inner.
-    } 
+        inner.tasks[current].first_running_time
+    }
+    fn update_current_task_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.syscall_times_record[current].syscall_times[syscall_id] += 1;
+
+    }
+    fn get_current_task_times(&self) -> Vec<u32> {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.syscall_times_record[current].syscall_times.clone()
+    }
     // LAB1: Try to implement your function to update or get task info!
 }
-
-pub fn get_current_first_running() -> usize {
-    TASK_MANAGER.get_current_first_running()
+pub fn get_current_task_status() -> TaskStatus {
+    TASK_MANAGER.get_current_task_status()
 }
-pub fn get_current_status() -> TaskStatus {
-    TASK_MANAGER.get_current_status()
+pub fn get_current_task_first_time() -> usize {
+    TASK_MANAGER.get_current_task_first_time()
 }
-
+pub fn update_current_task_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.update_current_task_syscall_times(syscall_id);
+}
+pub fn get_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
+    let syscall_times = TASK_MANAGER.get_current_task_times();
+    let mut res: [u32; MAX_SYSCALL_NUM] = [0; MAX_SYSCALL_NUM];
+    let mut index: usize = 0;
+    while index < MAX_SYSCALL_NUM {
+        res[index] = syscall_times[index];
+        index += 1;
+    }
+    res
+}
 /// Run the first task in task list.
 pub fn run_first_task() {
     TASK_MANAGER.run_first_task();
